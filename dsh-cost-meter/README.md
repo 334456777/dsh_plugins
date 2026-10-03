@@ -17,7 +17,7 @@ DeepSeek Harness（DSH）Web 界面的**实时会话费用插件**：在输入�
 - [特性](#特性)
 - [安装](#安装)
 - [配置文件](#配置文件)
-- [计费模型](#计费模型)
+- [默认计费模型](#默认计费模型)
 - [配置如何生效](#配置如何生效)
 - [已知限制](#已知限制)
 - [故障排查](#故障排查)
@@ -34,20 +34,32 @@ DeepSeek Harness（DSH）Web 界面的**实时会话费用插件**：在输入�
 
 ## 安装
 
-本插件由两半组成：host 半部分（`lib/index.js`）只做一件事——把配置文件通过 HTTP 暴露给浏览器；界面部分（`lib/client.js`）是浏览器端 bundle。
+1. 插件文件夹移动到 `.dsh\profiles\web\packages\` 文件夹下（没有则创建），链接进 `profile` 的 `node_modules`
 
+以下是PowerShell方式：
+```pwsh
+$base = Join-Path $env:USERPROFILE ".dsh\profiles"
+New-Item -ItemType Junction `
+  -Path   "$base\node_modules\dsh-cost-meter"
+  -Target "$base\web\packages\dsh-cost-meter"
+```
+
+以下是macOS/Linux方式：`ln -s <目标> <链接>`
 ```sh
-# 1. 包体放好（本目录即是），链接进 profile 的 node_modules
-#    Windows 上用目录联接（junction）而不是符号链接
-cmd /c mklink /J "%USERPROFILE%\.dsh\profiles\node_modules\dsh-cost-meter" "%USERPROFILE%\.dsh\profiles\web\packages\dsh-cost-meter"
+base="$HOME/.dsh/profiles"
+ln -s "$base/web/packages/dsh-cost-meter" "$base/node_modules/dsh-cost-meter"
+```
 
-# 2. 在 ~/.dsh/profiles/web/cordis.patch.yml 的顶层数组里插入：
-#    - insert:
-#        - id: cost-meter
-#          name: 'dsh-cost-meter'
+2. 在 ~/.dsh/profiles/web/cordis.patch.yml 顶层数组里插入条目
+```yaml
+- insert:
+  - id: cost-meter
+    name: 'dsh-cost-meter'
+```
 
-# 3. 重启 web 服务
-dsh web --no-open
+3. 启动 web 服务
+```
+dsh web
 ```
 
 之后：
