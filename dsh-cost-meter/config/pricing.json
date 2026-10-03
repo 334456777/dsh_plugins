@@ -1,0 +1,76 @@
+{
+  "$comment": "dsh-cost-meter 计费配置（唯一价格来源）。价格与高峰时段口径来自 DeepSeek 官方定价页：https://api-docs.deepseek.com/zh-cn/quick_start/pricing 。改完本文件后无需改动任何代码：host 端每次请求都会重新校验 mtime/size，浏览器端最长 5 分钟内自动生效（刷新页面立即生效）。",
+  "$pricingComment": "模型 ID → 非高峰单价（人民币元 / 百万 tokens）。匹配顺序：完全相等 → 最长前缀；表里没有的模型不显示费用行。cacheMiss 同时适用于「未命中输入」和「缓存写入」。单个模型可再写 peakMultiplier / offPeakMultiplier 覆盖全局峰谷倍率（旧模型那一代没有峰谷价时，两个都写 1）。",
+  "$legacyComment": "deepseek-chat / deepseek-reasoner 是 DeepSeek-V3.2-Exp 时代的旧 ID（非思考模式 / 思考模式），价格取自 2025-09-29 官方定价页的存档快照：https://web.archive.org/web/20250929102137/https://api-docs.deepseek.com/zh-cn/quick_start/pricing 。那一代没有峰谷价，所以把两个倍率都钉成 1，避免当成现役模型按 2 倍计费。现行价目表已不再列出这两个 ID，是否仍可调用请以官方为准。",
+  "$holidaysComment": "billing.holidays 填中国法定节假日日期（YYYY-MM-DD，北京时间），全天按非高峰计费；每半年照国务院办公厅放假安排更新一次。留空则仅按工作日窗口判断。",
+
+  "version": 1,
+  "updatedAt": "2026-10-04",
+  "source": "https://api-docs.deepseek.com/zh-cn/quick_start/pricing",
+
+  "billing": {
+    "offPeakMultiplier": 1,
+    "peakMultiplier": 2,
+    "peakZone": "Asia/Shanghai",
+    "peakWindows": [
+      { "days": [1, 2, 3, 4, 5], "start": "09:00", "end": "12:00" },
+      { "days": [1, 2, 3, 4, 5], "start": "14:00", "end": "18:00" }
+    ],
+    "holidays": []
+  },
+
+  "defaultModel": "deepseek-flash",
+
+  "pricing": {
+    "deepseek-flash": {
+      "cacheHit": 0.02,
+      "cacheMiss": 1,
+      "output": 4
+    },
+    "deepseek-v4-flash": {
+      "cacheHit": 0.02,
+      "cacheMiss": 1,
+      "output": 4
+    },
+    "deepseek-v4-flash-vision-exp": {
+      "cacheHit": 0.02,
+      "cacheMiss": 1,
+      "output": 4
+    },
+    "deepseek-v4-pro": {
+      "cacheHit": 0.15,
+      "cacheMiss": 4.5,
+      "output": 13.5
+    },
+    "deepseek-chat": {
+      "cacheHit": 0.2,
+      "cacheMiss": 2,
+      "output": 3,
+      "peakMultiplier": 1,
+      "offPeakMultiplier": 1
+    },
+    "deepseek-reasoner": {
+      "cacheHit": 0.2,
+      "cacheMiss": 2,
+      "output": 3,
+      "peakMultiplier": 1,
+      "offPeakMultiplier": 1
+    }
+  },
+
+  "display": {
+    "$comment": "计价货币：enabled 为总开关，false（默认）直接按人民币（元）显示、不换算也不联网取汇率；改成 true 后才按下面的设置换算：fixed 用固定汇率，feed 用实时汇率接口；实时汇率取不到时自动回退到 fixedRate。",
+    "currency": {
+      "enabled": false,
+      "code": "JPY",
+      "symbol": "円",
+      "source": "feed",
+      "fixedRate": 21,
+      "feed": {
+        "url": "https://open.er-api.com/v6/latest/CNY",
+        "ratePath": "rates.JPY",
+        "refreshMs": 60000
+      }
+    }
+  }
+}
