@@ -11,8 +11,8 @@
 以下是PowerShell方式：
 ```pwsh
 $base = Join-Path $env:USERPROFILE ".dsh\profiles"
-New-Item -ItemType Junction `
-  -Path   "$base\node_modules\<plugin-name>" `
+New-Item -ItemType Junction
+  -Path   "$base\node_modules\<plugin-name>"
   -Target "$base\web\packages\<plugin-name>"
 ```
 
