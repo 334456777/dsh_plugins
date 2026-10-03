@@ -7,6 +7,7 @@ DeepSeek Harness（DSH）Web 界面的**浏览器通知插件**
 
 ## 目录
 
+- [安装](#安装)
 - [使用](#使用)
 - [浏览器能力矩阵](#浏览器能力矩阵)
 - [触发条件](#触发条件)
@@ -16,9 +17,39 @@ DeepSeek Harness（DSH）Web 界面的**浏览器通知插件**
 - [安装](#安装)
 - [卸载](#卸载)
 
+## 安装
+
+1. 插件文件夹移动到 `.dsh\profiles\web\packages\` 文件夹下（没有则创建），链接进 `profile` 的 `node_modules`
+
+以下是PowerShell方式：
+```pwsh
+$base = Join-Path $env:USERPROFILE ".dsh\profiles"
+New-Item -ItemType Junction `
+  -Path   "$base\node_modules\dsh-notifier"
+  -Target "$base\web\packages\dsh-notifier"
+```
+
+以下是macOS/Linux方式：`ln -s <目标> <链接>`
+```sh
+base="$HOME/.dsh/profiles"
+ln -s "$base/web/packages/dsh-notifier" "$base/node_modules/dsh-notifier"
+```
+
+2. 在 ~/.dsh/profiles/web/cordis.patch.yml 顶层数组里插入条目
+```yaml
+- insert:
+  - id: notifier
+    name: 'dsh-notifier'
+```
+
+3. 启动 web 服务
+```
+dsh web
+```
+
 ## 使用
 
-输入框右侧的工具行会多一个 **`通知 · 开/关`** 小按钮：
+选择模型按钮左边会多一个 **`通知 · 开/关`** 小按钮：
 
 1. 点击 → 浏览器弹出通知权限请求 → 允许（Safari 会在「网站设置」里记住 `127.0.0.1`）。
 2. 开启瞬间会立刻发一条「通知已开启」的测试通知，用来确认链路通畅。
