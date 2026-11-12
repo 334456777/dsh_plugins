@@ -12,6 +12,7 @@ DeepSeek Harness（DSH）Web 界面的**浏览器通知插件**
 - [浏览器能力矩阵](#浏览器能力矩阵)
 - [触发条件](#触发条件)
 - [重复提醒](#重复提醒)
+- [Windows：每次都通知与清理](#windows每次都通知与清理)
 - [技术实现](#技术实现)
 - [已知限制](#已知限制)
 - [安装](#安装)
@@ -88,8 +89,28 @@ dsh web
 
 - 首次提醒在 60 秒后；
 - 之后每次比上一次提前 5 秒，最快 5 秒一次；
-- 每次都用同一个 `tag` 重新发送，因此操作系统通知中心里始终是**同一条**在反复响铃/弹横幅，而不是刷屏；
+- 通知中心里始终是**同一条**在反复响铃/弹横幅，而不是刷屏：macOS 上用同一个 `tag` 重新发送即可；Windows 上同 `tag` 替换不会再响，因此每次先关掉同组上一条、再以新 `tag` 发一条（见下文「[Windows：每次都通知与清理](#windows每次都通知与清理)」）；
 - 窗口重新获得焦点（`focus` / `visibilitychange`）时，所有重复提醒立即停止；关闭开关同样全部停止。
+
+## Windows：每次都通知与清理
+
+macOS 与 Windows 走两条路径，按 `navigator.userAgentData.platform` / UA 中是否含 `Windows` 判断：
+
+| 平台 | 通知 `tag` | 同组旧条目 | 窗口重新获得焦点 |
+| --- | --- | --- | --- |
+| macOS（及其它非 Windows 平台） | 固定为组名，与修改前完全一致 | 由系统按同 `tag` 直接替换，替换时照常弹横幅/响铃 | 停止重复提醒 |
+| Windows | `组名#时间戳-序号`，每次都不同 | 发新条目前先关掉，同组只留最新一条 | 停止重复提醒，并清空本插件的所有通知 |
+
+为什么 Windows 要单独处理：Chromium 在 Windows 上发出一条 `tag` 与操作中心里**尚未清除**的旧通知相同的通知时，只会**静默替换**旧条目——不弹横幅、不响铃。修改前完成通知固定用 `dsh-done-<sessionId>`，所以同一会话第二次完成就「没通知」，重复提醒在 Windows 上也从未真正响过。
+
+Windows 路径的细节：
+
+- **逻辑分组**：每类通知有一个组名（`dsh-done-<sessionId>`、`dsh-approval-<key>`、`dsh-notifier-test`），存在通知的 `data.group` 里；
+- **每次新 `tag`**：实际 `tag` 为 `组名#时间戳-序号`，永不与旧条目重复，所以每次都是一条全新通知；
+- **先清后发**：发出前先关掉同组仍留在操作中心的旧条目（页面通道直接持有引用；SW 通道通过 `registration.getNotifications()` 找到，连其它标签页和修改前遗留的固定 `tag` 条目也一并清掉）；
+- **自动清理**：窗口重新获得焦点时清空本插件的所有通知；审批被应答（页面上、通知按钮或其它途径）后，其通知一并撤掉；关闭开关时同样全部清空。
+
+两个平台共有的修正：审批在别处被应答（离开 `pending`）后，它的重复提醒立即停止（修改前会一直提醒到窗口获得焦点）。
 
 ## 技术实现
 
@@ -119,7 +140,8 @@ wait.respond({ ok: true, value: { sessionId, approvalId, outcome } })
 - **数据来源**：全部来自会话快照标准座位——`useSession(s => s.pending)`（审批载体数组，各自带 `respond` 应答方法）与 `useSession(s => s.running)`（完成信号），`useSessions` 取会话标题。host 端不需要参与。
 - **双用途 bundle**：同一个 `lib/client.js` 在 ServiceWorker 全局作用域里只安装 `notificationclick` 桥；在页面里正常注册 UI。这样不必额外维护一个 SW 文件。
 - **审批应答**：通知按钮点击 → SW 找到非 `/plugins/` 前缀的窗口（即 DSH 页面）→ `postMessage({ source: "dsh-notifier", action: "approval-answer", key, outcome })` → 页面按 `key` 找到 `PendingWait` 并 `respond`。
-- **重复提醒的定时器**：以通知 `tag` 为键集中管理（`reminders`），同一 `tag` 只保留一个循环。
+- **重复提醒的定时器**：以通知组名为键集中管理（`reminders`），同一组只保留一个循环。
+- **发送串行化（Windows）**：「关旧条目 → 发新条目」经同一个 Promise 队列（`fireQueue`）依次执行，同组的两次发送不会交错。
 - **locale**：文案注册在命名空间 `notifier` 下，随界面语言切换中英文。
 - **槽位**：`conversation.input.right`（输入框右侧工具行），条目 id `notifier`，`order: 50`。
 
@@ -129,7 +151,7 @@ wait.respond({ ok: true, value: { sessionId, approvalId, outcome } })
 - **页面关闭后按钮点击无效**：审批载体活在页面里，页面不在时通知按钮的决定无处投递，审批保持挂起，直到回到页面。
 - **只通知审批类交互**，代理提问（`question`）不通知。
 - **子代理会话不通知**：只跟踪当前顶层会话。
-- **多开标签页可能重复通知**：每个标签页都会侦测到同一状态变化；操作系统按 `tag` 去重合并，但仍可能出现多余的一次提醒。
+- **多开标签页可能重复通知**：每个标签页都会侦测到同一状态变化；macOS 上操作系统按 `tag` 去重合并，Windows 上发送前会清掉同组旧条目（SW 通道跨标签页可见），但两者都仍可能出现多余的一次提醒。
 - **Service Worker 注册用的是绝对路径** `/plugins/dsh-notifier/client.js`：把 DSH 挂在子路径下部署时按钮会失效（通知本体仍走页面通道）。如需支持挂载前缀，可改为按 `import.meta.url` 推导。
 - **通知权限是浏览器级设置**：关闭插件开关不会撤销已授予的权限，需要用浏览器的站点设置清除。
 

@@ -122,20 +122,96 @@ if (typeof window === "undefined" && typeof self !== "undefined" && typeof Servi
 				if (typeof document === "undefined") return false;
 				return document.visibilityState === "visible" && document.hasFocus();
 			}
-			/** Dispatch one notification: SW route on Chromium, page route on Safari or failure. */
-			function fireNotification(title, options) {
-				if (typeof window === "undefined" || !("Notification" in window) || window.Notification.permission !== "granted") return Promise.resolve();
-				if (options.ignoreFocus !== true && isFocused()) return Promise.resolve();
-				const page = () => {
-					const notification = new window.Notification(title, {
-						body: options.body,
-						tag: options.tag,
-						requireInteraction: options.requireInteraction ?? false
+			/** True when notifications can be shown at all (API present, permission granted). */
+			function canNotify() {
+				return typeof window !== "undefined" && "Notification" in window && window.Notification.permission === "granted";
+			}
+			/**
+			 * Windows needs the fresh-tag + cleanup path (see `uniqueTag`). On macOS
+			 * the stable-tag replace already re-alerts, so every other platform keeps
+			 * the original behavior untouched: tag = group, nothing closed by us.
+			 */
+			function isWindows() {
+				if (typeof navigator === "undefined") return false;
+				const platform = navigator.userAgentData?.platform ?? "";
+				return platform === "Windows" || /Windows/.test(navigator.userAgent ?? "");
+			}
+			/** Prefix shared by every notification group this plugin owns. */
+			const GROUP_PREFIX = "dsh-";
+			/** Per-page counter that makes each fired tag unique. */
+			let fireSeq = 0;
+			/**
+			 * Windows only: every fire gets its own tag. Re-using a tag while the
+			 * previous entry is still in the Action Center makes Chromium on Windows
+			 * replace it silently — no banner, no sound — which is why the second
+			 * completion notice of a session never showed. The logical identity lives
+			 * in `group` instead; the previous entry of a group is closed first.
+			 */
+			function uniqueTag(group) {
+				fireSeq += 1;
+				return `${group}#${Date.now().toString(36)}-${fireSeq}`;
+			}
+			/** Page-route notifications still on screen, keyed by group. */
+			const pageNotifications = /* @__PURE__ */ new Map();
+			/**
+			 * Close every notification of ours whose group satisfies `match`: the
+			 * page-route ones we hold, plus the SW-route ones the registration still
+			 * lists (which also covers other DSH tabs and entries left over from the
+			 * old stable-tag version, whose group is simply their tag). Windows only;
+			 * a no-op elsewhere, so macOS keeps its pre-fix behavior.
+			 */
+			function closeNotifications(match) {
+				if (!isWindows()) return Promise.resolve();
+				for (const [group, set] of Array.from(pageNotifications)) {
+					if (!match(group)) continue;
+					pageNotifications.delete(group);
+					for (const notification of set) notification.close();
+				}
+				if (!canNotify() || isSafari()) return Promise.resolve();
+				return ensureServiceWorker().then((registration) => {
+					if (registration === null || typeof registration.getNotifications !== "function") return;
+					return registration.getNotifications().then((list) => {
+						for (const notification of list) {
+							const group = typeof notification.data?.group === "string" ? notification.data.group : notification.tag;
+							if (typeof group === "string" && group.startsWith(GROUP_PREFIX) && match(group)) notification.close();
+						}
 					});
-					notification.onclick = () => {
-						window.focus();
-						notification.close();
-					};
+				}).catch(() => {});
+			}
+			/** Close the notifications of one group. */
+			function closeGroup(group) {
+				return closeNotifications((candidate) => candidate === group);
+			}
+			/** Close every notification this plugin has shown. */
+			function closeAllNotifications() {
+				return closeNotifications(() => true);
+			}
+			/** Show one notification: SW route on Chromium, page route on Safari or failure. */
+			function showNotification(title, options, tag) {
+				const group = options.group;
+				const page = () => {
+					try {
+						const notification = new window.Notification(title, {
+							body: options.body,
+							tag,
+							requireInteraction: options.requireInteraction ?? false
+						});
+						let set = pageNotifications.get(group);
+						if (set === void 0) {
+							set = /* @__PURE__ */ new Set();
+							pageNotifications.set(group, set);
+						}
+						const owner = set;
+						owner.add(notification);
+						notification.onclick = () => {
+							window.focus();
+							notification.close();
+						};
+						notification.onclose = () => {
+							owner.delete(notification);
+							if (owner.size === 0 && pageNotifications.get(group) === owner) pageNotifications.delete(group);
+						};
+					} catch {}
 				};
 				if (isSafari()) {
 					page();
@@ -146,16 +222,37 @@ if (typeof window === "undefined" && typeof self !== "undefined" && typeof Servi
 						page();
 						return;
 					}
-					registration.showNotification(title, {
+					return registration.showNotification(title, {
 						body: options.body,
-						tag: options.tag,
+						tag,
 						requireInteraction: options.requireInteraction ?? false,
 						actions: options.actions ?? [],
-						data: options.data ?? {}
+						data: {
+							...options.data ?? {},
+							group
+						}
 					}).catch(() => {
 						page();
 					});
 				});
+			}
+			/** Serializes close-then-show so two fires of one group cannot interleave. */
+			let fireQueue = Promise.resolve();
+			/**
+			 * Dispatch one notification of `options.group`. Windows: close whatever
+			 * that group still has in the Action Center, then show a fresh entry under
+			 * a unique tag — so every fire banners and sounds, and only the latest
+			 * entry of each group is left behind. Elsewhere (macOS): the original
+			 * route, tag = group, the OS replaces the entry itself.
+			 */
+			function fireNotification(title, options) {
+				if (!canNotify()) return Promise.resolve();
+				if (options.ignoreFocus !== true && isFocused()) return Promise.resolve();
+				if (!isWindows()) return showNotification(title, options, options.group);
+				const run =() => closeGroup(options.group).then(() => showNotification(title, options, uniqueTag(options.group)));
+				const next = fireQueue.then(run, run);
+				fireQueue = next.catch(() => {});
+				return next;
 			}
 			/** First line of a reason string, for the notification body. */
 			function firstLine(text) {
@@ -166,43 +263,44 @@ if (typeof window === "undefined" && typeof self !== "undefined" && typeof Servi
 			function truncate(text, limit) {
 				return text.length <= limit ? text : `${text.slice(0, limit)}…`;
 			}
-			/** Active reminder timers, keyed by notification tag (same tag → one entry). */
+			/** Active reminder timers, keyed by notification group (same group → one entry). */
 			const reminders = /* @__PURE__ */ new Map();
-			/** Stop the reminder loop for one notification tag. */
-			function stopReminder(tag) {
-				const entry = reminders.get(tag);
+			/** Stop the reminder loop for one notification group. */
+			function stopReminder(group) {
+				const entry = reminders.get(group);
 				if (entry === void 0) return;
 				clearTimeout(entry.timer);
-				reminders.delete(tag);
+				reminders.delete(group);
 			}
 			/** Stop every active reminder loop. */
 			function stopAllReminders() {
-				for (const tag of Array.from(reminders.keys())) stopReminder(tag);
+				for (const group of Array.from(reminders.keys())) stopReminder(group);
 			}
 			/**
 			 * After a notification fires, re-alert until the user focuses the window:
-			 * first repeat after 60s, each repeat 5s sooner, floored at 5s. Re-firing
-			 * with the same tag replaces the entry in the OS notification center, so
-			 * the user sees one entry that keeps re-bannering and re-sounding — the
-			 * same effect as clicking the toggle's test notification repeatedly.
+			 * first repeat after 60s, each repeat 5s sooner, floored at 5s. The
+			 * notification center keeps one entry per group that re-banners and
+			 * re-sounds: on macOS the same-tag replace does that by itself; on
+			 * Windows (where a same-tag replace stays silent) each repeat closes the
+			 * previous entry and shows a fresh one.
 			 */
 			function scheduleReminder(title, options) {
-				const tag = options.tag;
-				if (typeof tag !== "string" || tag === "") return;
-				stopReminder(tag);
+				const group = options.group;
+				if (typeof group !== "string" || group === "") return;
+				stopReminder(group);
 				let delay = 60000;
 				const step = () => {
-					reminders.delete(tag);
+					reminders.delete(group);
 					if (!enabledRef) return;
 					if (isFocused()) return;
-					if (typeof window === "undefined" || !("Notification" in window) || window.Notification.permission !== "granted") return;
+					if (!canNotify()) return;
 					fireNotification(title, { ...options, ignoreFocus: true }).catch(() => {});
 					delay = Math.max(5000, delay - 5000);
 					const timer = setTimeout(step, delay);
-					reminders.set(tag, { timer });
+					reminders.set(group, { timer });
 				};
 				const timer = setTimeout(step, delay);
-				reminders.set(tag, { timer });
+				reminders.set(group, { timer });
 			}
 			/** Fire once, then keep re-alerting until the window is focused. */
 			function fireAndRemind(title, options) {
@@ -210,17 +308,24 @@ if (typeof window === "undefined" && typeof self !== "undefined" && typeof Servi
 				if (!isFocused()) scheduleReminder(title, options);
 				return promise;
 			}
-			/** Cancel every reminder the moment the window regains focus. */
-			let reminderFocusArmed = false;
-			function armReminderFocusCancel() {
-				if (reminderFocusArmed || typeof window === "undefined") return;
-				reminderFocusArmed = true;
-				const cancelAll = () => {
+			/**
+			 * The moment the window regains focus the user is looking at DSH: stop
+			 * every reminder and (Windows) clear our entries from the Action Center —
+			 * their news is on screen now. Returns the disposer.
+			 */
+			function armFocusCleanup() {
+				if (typeof window === "undefined" || typeof document === "undefined") return () => {};
+				const onFocus = () => {
 					if (!isFocused()) return;
 					stopAllReminders();
+					if (enabledRef || registrationPromise !== null || pageNotifications.size > 0) closeAllNotifications().catch(() => {});
 				};
-				window.addEventListener("focus", cancelAll);
-				window.addEventListener("visibilitychange", cancelAll);
+				window.addEventListener("focus", onFocus);
+				document.addEventListener("visibilitychange", onFocus);
+				return () => {
+					window.removeEventListener("focus", onFocus);
+					document.removeEventListener("visibilitychange", onFocus);
+				};
 			}
 			/** Restore the persisted toggle state (granted permission required). */
 			function readEnabled() {
@@ -247,7 +352,8 @@ if (typeof window === "undefined" && typeof self !== "undefined" && typeof Servi
 				const pending = useSession((snapshot) => snapshot.pending) ?? [];
 				const running = useSession((snapshot) => snapshot.running) ?? false;
 				const displayTitle = useSessions((list) => list.byId[sessionId]?.displayTitle);
-				const seen = react.useRef(new Set());
+				/** Approval keys already notified → the session they were seen under. */
+				const seen = react.useRef(/* @__PURE__ */ new Map());
 				react.useEffect(() => {
 					if (!enabledRef) {
 						seen.current.clear();
@@ -257,13 +363,13 @@ if (typeof window === "undefined" && typeof self !== "undefined" && typeof Servi
 						if (wait.kind !== "approval") continue;
 						activeApprovals.set(wait.key, wait);
 						if (seen.current.has(wait.key)) continue;
-						seen.current.add(wait.key);
+						seen.current.set(wait.key, sessionId);
 						const toolName = typeof wait.payload?.toolName === "string" ? wait.payload.toolName : "";
 						const reason = typeof wait.payload?.reason === "string" ? firstLine(wait.payload.reason) : "";
 						const body = `${toolName}${reason === "" ? "" : ` · ${reason}`}`;
 						fireAndRemind(t("notify.approvalTitle"), {
 							body: truncate(body, 180),
-							tag: `dsh-approval-${wait.key}`,
+							group: `dsh-approval-${wait.key}`,
 							requireInteraction: true,
 							actions: [{
 								action: "allow",
@@ -277,14 +383,24 @@ if (typeof window === "undefined" && typeof self !== "undefined" && typeof Servi
 							}
 						}).catch(() => {});
 					}
-					for (const key of seen.current) if (!pending.some((wait) => wait.key === key)) seen.current.delete(key);
-				}, [pending]);
+					// An approval of this session that left `pending` is answered (here, via
+					// the notification buttons, or elsewhere): stop its reminder and take
+					// its entry out of the notification center. Keys seen under another
+					// session are left alone — switching sessions does not resolve them.
+					for (const [key, owner] of Array.from(seen.current)) {
+						if (owner !== sessionId || pending.some((wait) => wait.key === key)) continue;
+						seen.current.delete(key);
+						activeApprovals.delete(key);
+						stopReminder(`dsh-approval-${key}`);
+						closeGroup(`dsh-approval-${key}`).catch(() => {});
+					}
+				}, [pending, sessionId]);
 				react.useEffect(() => {
 					const previous = runningRefs.get(sessionId);
 					if (previous === true && running === false && enabledRef && pending.length === 0) {
 						fireAndRemind(t("notify.doneTitle"), {
 							body: typeof displayTitle === "string" && displayTitle !== "" ? displayTitle : t("notify.doneFallback"),
-							tag: `dsh-done-${sessionId}`,
+							group: `dsh-done-${sessionId}`,
 							actions: [],
 							data: {}
 						}).catch(() => {});
@@ -305,13 +421,14 @@ if (typeof window === "undefined" && typeof self !== "undefined" && typeof Servi
 							ensureServiceWorker().catch(() => {});
 							fireNotification(t("notify.testTitle"), {
 								body: t("notify.testBody"),
-								tag: "dsh-notifier-test",
+								group: "dsh-notifier-test",
 								actions: [],
 								data: {},
 								ignoreFocus: true
 							}).catch(() => {});
 						} else {
 							stopAllReminders();
+							closeAllNotifications().catch(() => {});
 						}
 					};
 					if (window.Notification.permission === "default") {
@@ -337,7 +454,7 @@ if (typeof window === "undefined" && typeof self !== "undefined" && typeof Servi
 			const inject = ["slots", "locale"];
 			/** Mount the toggle and the SW→page answer bridge. */
 			function apply(ctx) {
-				armReminderFocusCancel();
+				ctx.effect(() => armFocusCleanup(), "notifier: focus cleanup");
 				ctx.effect(() => ctx.locale.register(NS, {
 					zh,
 					en
@@ -352,6 +469,7 @@ if (typeof window === "undefined" && typeof self !== "undefined" && typeof Servi
 						const outcome = data.outcome === "allowed-once" || data.outcome === "rejected" ? data.outcome : null;
 						if (outcome === null) return;
 						stopReminder(`dsh-approval-${data.key}`);
+						closeGroup(`dsh-approval-${data.key}`).catch(() => {});
 						wait.respond({
 							ok: true,
 							value: {
