@@ -94,6 +94,8 @@ dsh web
 
 ## Windows：每次都通知与清理
 
+> **测试情况**：Windows 路径已在 **Windows 上的 Chrome** 实测通过（同一会话多次完成都会弹通知，旧通知会被清理）。macOS 路径保持修改前的原有实现不变（修改前已在 macOS 上可用）。
+
 macOS 与 Windows 走两条路径，按 `navigator.userAgentData.platform` / UA 中是否含 `Windows` 判断：
 
 | 平台 | 通知 `tag` | 同组旧条目 | 窗口重新获得焦点 |
